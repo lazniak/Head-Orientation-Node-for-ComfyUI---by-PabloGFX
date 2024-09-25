@@ -24,7 +24,8 @@ class HeadOrientationNode:
             }
         }
 
-    RETURN_TYPES = ("IMAGE",)
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("sorted_images", "data")
     FUNCTION = "process_images"
     CATEGORY = "image/PabloGFX"
 
@@ -43,10 +44,13 @@ class HeadOrientationNode:
         reference_orientations = self.analyze_orientations(reference_images)
 
         print(f"{Colors.YELLOW}[PROCESS] Sorting images...{Colors.ENDC}")
-        sorted_images = self.sort_images(image, input_orientations, reference_orientations)
+        sorted_images, sorted_orientations = self.sort_images(image, input_orientations, reference_orientations)
+
+        data_output = self.format_orientation_data(sorted_orientations)
 
         print(f"{Colors.GREEN}[PROCESS] Output images shape: {sorted_images.shape}, dtype: {sorted_images.dtype}{Colors.ENDC}")
-        return (sorted_images,)
+        print(f"{Colors.GREEN}[PROCESS] Output data: \n{data_output}{Colors.ENDC}")
+        return (sorted_images, data_output)
 
     def analyze_orientations(self, images):
         print(f"{Colors.BLUE}[ANALYZE] Starting analysis of {images.shape[0]} images{Colors.ENDC}")
@@ -109,6 +113,7 @@ class HeadOrientationNode:
     def sort_images(self, images, input_orientations, reference_orientations):
         print(f"{Colors.BLUE}[SORT] Sorting {len(input_orientations)} input images based on {len(reference_orientations)} reference orientations{Colors.ENDC}")
         sorted_indices = []
+        sorted_orientations = []
         used_indices = set()
 
         for ref_idx, ref_orientation in enumerate(reference_orientations):
@@ -127,24 +132,33 @@ class HeadOrientationNode:
 
             if best_index != -1:
                 sorted_indices.append(best_index)
+                sorted_orientations.append(input_orientations[best_index])
                 used_indices.add(best_index)
                 print(f"{Colors.GREEN}[SORT] Best match for reference {ref_idx+1} is input image {best_index+1}, difference: {best_diff:.2f}{Colors.ENDC}")
             else:
                 for i in range(len(input_orientations)):
                     if i not in used_indices:
                         sorted_indices.append(i)
+                        sorted_orientations.append(input_orientations[i])
                         used_indices.add(i)
                         print(f"{Colors.YELLOW}[SORT] No match found for reference {ref_idx+1}, using input image {i+1}{Colors.ENDC}")
                         break
 
         while len(sorted_indices) < len(reference_orientations):
             sorted_indices.append(sorted_indices[-1])
+            sorted_orientations.append(sorted_orientations[-1])
             print(f"{Colors.YELLOW}[SORT] Not enough input images, repeating last image (index {sorted_indices[-1]+1}){Colors.ENDC}")
 
         print(f"{Colors.BLUE}[SORT] Final sorted indices: {sorted_indices}{Colors.ENDC}")
         sorted_images = images[sorted_indices]
         print(f"{Colors.GREEN}[SORT] Sorted images shape: {sorted_images.shape}{Colors.ENDC}")
-        return sorted_images
+        return sorted_images, sorted_orientations
+
+    def format_orientation_data(self, orientations):
+        data_output = ""
+        for x, y, z in orientations:
+            data_output += f"[{x:.2f},{y:.2f},{z:.2f}]\n"
+        return data_output
 
 # This line is necessary for ComfyUI to recognize and load your custom node
 NODE_CLASS_MAPPINGS = {
