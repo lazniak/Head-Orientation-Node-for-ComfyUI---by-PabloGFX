@@ -1,7 +1,7 @@
 [project]
 name = "head-orientation-node"
 description = "A custom node for ComfyUI that analyzes and sorts images based on head orientation using MediaPipe. It detects facial landmarks, calculates head pose, and intelligently sorts images for enhanced AI image processing workflows."
-version = "1.0.1"
+version = "1.0.11"
 license = {file = "LICENSE"}
 
 [project.urls]
