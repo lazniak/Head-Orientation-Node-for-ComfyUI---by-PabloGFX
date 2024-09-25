@@ -1,3 +1,20 @@
+## Head Orientation Node Update version = "1.0.11"
+
+### New Data Output Format
+
+The Head Orientation Node now provides a string output named "data" alongside the sorted images. This output contains information about the head orientation for each processed image.
+
+#### Format Details:
+- Each line in the output represents one image's head orientation.
+- The format for each line is `[x,y,z]`, where:
+  - `x`: Rotation around the X-axis (nodding up and down)
+  - `y`: Rotation around the Y-axis (turning left and right)
+  - `z`: Rotation around the Z-axis (tilting head side to side)
+- All values are in degrees and rounded to two decimal places.
+- Each orientation is on a new line.
+
+#### Example Output:
+
 # Head Orientation Node for ComfyUI
 
 ## Description
