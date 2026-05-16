@@ -1,10 +1,62 @@
 # Head Orientation Node for ComfyUI
 
-Version **1.2.0** — by **PabloGFX**
+Version **1.3.0** — by **PabloGFX**
 
 A custom ComfyUI node that detects faces, estimates head pose (pitch / yaw /
-roll), sorts a batch of input images by similarity to a reference batch, and
+roll), sorts a batch of images by similarity to a query / reference batch, and
 emits a configurable, well-formatted string describing the orientations.
+
+---
+
+## What's new in 1.3.0
+
+### New `sort_source` parameter — fixes the "query + candidate pool" use case
+
+In v1.0.x – v1.2.0 the node always sorted the `image` input batch using
+`reference_images` as the target poses, and put the sorted inputs into
+`sorted_images`. That semantic confused users who had one main image and a
+*pool of candidate references* they wanted ranked — the most common case in
+ComfyUI workflows.
+
+v1.3.0 adds `sort_source` with two modes:
+
+- **`sort_source = "references"` (new default)** — treats `image` as the query
+  / target pose and `reference_images` as the candidate pool.
+  `sorted_images` = candidate references reordered by similarity to the query.
+  Use this when you have one main image and want the most-similar candidates
+  from a pool.
+- **`sort_source = "inputs"` (legacy v1.x semantic)** — sorts the `image`
+  batch by similarity to `reference_images`. `sorted_images` = reordered
+  inputs.
+
+In the user-reported bug case (1 image + 2 references), v1.3.0 with default
+settings now returns 2 sorted references in `sorted_images` and 2 matching
+lines in `data` — instead of 1 input + N duplicate data lines.
+
+### Lower default detection confidence + new parameter
+
+`min_detection_confidence` is now exposed (`0.05`–`1.0`, default `0.3`,
+previously hard-coded to `0.5`). Lower values are more permissive and detect
+faces in dim portraits, faces under hats, low-contrast frames etc. The
+detector is rebuilt automatically when the value changes.
+
+### `data_content` default changed to `outputs`
+
+With the new `sort_source` default, `outputs` is the most useful default —
+each row in `data` describes the corresponding sorted output image (aligned
+with what you see in `sorted_images`). Other values:
+
+- `references` — orientations of every `reference_images` item in input order.
+- `inputs` — orientations of every `image` item in input order.
+- `paired` — sorted outputs paired with the closest match from the OPPOSITE
+  batch.
+
+### Per-row distance is now distance to the OPPOSITE batch
+
+`include_distance = true` always reports the angular distance from this row's
+item to the closest item in the opposite batch (works for `outputs`,
+`inputs`, `references`, `paired`). Previously distance was always
+"to references"; now it follows the data content.
 
 ---
 

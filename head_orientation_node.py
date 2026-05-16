@@ -192,11 +192,14 @@ class _FaceDetector:
 # Sort + scoring helpers
 # ---------------------------------------------------------------------------
 
+SORT_SOURCES = ["references", "inputs"]
 SORT_MODES = ["similarity_to_refs", "reverse_similarity", "match_references", "as_is"]
 SIMILARITY_METRICS = ["min_to_any_ref", "mean_to_refs", "first_ref_only"]
-DATA_CONTENTS = ["references", "outputs", "inputs", "paired"]
+DATA_CONTENTS = ["outputs", "references", "inputs", "paired"]
 DATA_FORMATS = ["compact", "labeled", "csv", "json", "verbose"]
 ANGLE_UNITS = ["degrees", "radians"]
+
+DEFAULT_DETECTION_CONFIDENCE = 0.3
 
 
 def _angular_distance(a: Orientation, b: Orientation) -> float:
@@ -323,44 +326,60 @@ def _build_rows(data_content: str,
                 input_orientations: Sequence[Orientation],
                 reference_orientations: Sequence[Orientation],
                 sorted_indices: Sequence[int],
+                pool_orientations: Sequence[Orientation],
+                target_orientations: Sequence[Orientation],
                 angle_unit: str) -> List[_Row]:
+    """Build rows for the data string.
+
+    `references` and `inputs` always describe their named batch in input order
+    (independent of sort_source / sort_mode). `outputs` and `paired` describe
+    the items currently in `sorted_images` (pool, in sorted order); their
+    "reference" column is taken from the target batch (the opposite of the
+    pool). `distance` is always the angular distance to the closest item in
+    the OPPOSITE batch.
+    """
     rows: List[_Row] = []
 
     if data_content == "references":
         for i, ref in enumerate(reference_orientations):
+            closest_idx, closest_dist = _closest_ref_idx(ref, input_orientations)
+            paired = input_orientations[closest_idx] if closest_idx >= 0 else None
             rows.append(_Row(
                 index=i + 1,
                 label="reference",
                 orientation=_orientation_to_unit(ref, angle_unit),
                 reference=None,
-                distance=None,
+                distance=_to_unit(closest_dist if paired is not None else None, angle_unit),
             ))
         return rows
 
     if data_content == "inputs":
         for i, o in enumerate(input_orientations):
             closest_idx, closest_dist = _closest_ref_idx(o, reference_orientations)
-            ref = reference_orientations[closest_idx] if closest_idx >= 0 else None
+            paired = reference_orientations[closest_idx] if closest_idx >= 0 else None
             rows.append(_Row(
                 index=i + 1,
                 label="input",
                 orientation=_orientation_to_unit(o, angle_unit),
-                reference=_orientation_to_unit(ref, angle_unit),
-                distance=_to_unit(closest_dist if ref is not None else None, angle_unit),
+                reference=None,
+                distance=_to_unit(closest_dist if paired is not None else None, angle_unit),
             ))
         return rows
 
-    # outputs / paired share the same iteration over sorted outputs
+    # outputs / paired - iterate over sorted output items (from the pool)
     for i, src_idx in enumerate(sorted_indices):
-        o = input_orientations[src_idx] if 0 <= src_idx < len(input_orientations) else (0.0, 0.0, 0.0)
-        closest_idx, closest_dist = _closest_ref_idx(o, reference_orientations)
-        ref = reference_orientations[closest_idx] if closest_idx >= 0 else None
+        if 0 <= src_idx < len(pool_orientations):
+            o = pool_orientations[src_idx]
+        else:
+            o = (0.0, 0.0, 0.0)
+        closest_idx, closest_dist = _closest_ref_idx(o, target_orientations)
+        target = target_orientations[closest_idx] if closest_idx >= 0 else None
         rows.append(_Row(
             index=i + 1,
             label="output",
             orientation=_orientation_to_unit(o, angle_unit),
-            reference=_orientation_to_unit(ref, angle_unit) if data_content == "paired" else None,
-            distance=_to_unit(closest_dist if ref is not None else None, angle_unit),
+            reference=_orientation_to_unit(target, angle_unit) if data_content == "paired" else None,
+            distance=_to_unit(closest_dist if target is not None else None, angle_unit),
         ))
     return rows
 
@@ -516,17 +535,32 @@ class HeadOrientationNode:
                 "reference_images": ("IMAGE",),
             },
             "optional": {
+                "sort_source": (
+                    SORT_SOURCES,
+                    {
+                        "default": "references",
+                        "tooltip": (
+                            "Which batch is placed in `sorted_images`.\n\n"
+                            "references (default): treat `image` as the query / target pose and "
+                            "`reference_images` as the candidate pool. sorted_images = candidates "
+                            "reordered by similarity to the query. Use this when you have one "
+                            "main image and want the most similar candidates from a pool.\n\n"
+                            "inputs (legacy v1.x semantic): sort the `image` batch by similarity "
+                            "to `reference_images`. sorted_images = reordered inputs."
+                        ),
+                    },
+                ),
                 "sort_mode": (
                     SORT_MODES,
                     {
                         "default": "similarity_to_refs",
                         "tooltip": (
-                            "similarity_to_refs (default): sort inputs by similarity to references, "
-                            "closest first; output count = input count.\n"
+                            "How the pool is ordered.\n"
+                            "similarity_to_refs (default): sort by similarity to the target batch, "
+                            "closest first.\n"
                             "reverse_similarity: same metric, farthest first.\n"
-                            "match_references: legacy v1.1.0 1-to-1 greedy match; "
-                            "output count = reference count (repeats inputs if needed).\n"
-                            "as_is: pass inputs through unchanged."
+                            "match_references: greedy 1-to-1 match; output count = target count.\n"
+                            "as_is: pass the pool through in its original order."
                         ),
                     },
                 ),
@@ -536,9 +570,9 @@ class HeadOrientationNode:
                         "default": "min_to_any_ref",
                         "tooltip": (
                             "Distance metric used for similarity sorting.\n"
-                            "min_to_any_ref: distance to the nearest reference.\n"
-                            "mean_to_refs: average distance to all references.\n"
-                            "first_ref_only: distance to the first reference only."
+                            "min_to_any_ref: distance to the nearest target.\n"
+                            "mean_to_refs: average distance to all targets.\n"
+                            "first_ref_only: distance to the first target only."
                         ),
                     },
                 ),
@@ -550,8 +584,8 @@ class HeadOrientationNode:
                         "max": 4096,
                         "step": 1,
                         "tooltip": (
-                            "Force the number of output images. 0 = auto: input count for "
-                            "similarity/reverse/as_is modes, reference count for match_references. "
+                            "Force the number of output images. 0 = auto: pool count for "
+                            "similarity/reverse/as_is modes, target count for match_references. "
                             "Excess items are truncated; missing items repeat the last."
                         ),
                     },
@@ -559,13 +593,14 @@ class HeadOrientationNode:
                 "data_content": (
                     DATA_CONTENTS,
                     {
-                        "default": "references",
+                        "default": "outputs",
                         "tooltip": (
                             "What goes into the `data` string.\n"
-                            "references (default): one line per reference image (target poses).\n"
-                            "outputs: one line per sorted output image.\n"
-                            "inputs: one line per ORIGINAL input image (pre-sort).\n"
-                            "paired: one line per sorted output with its closest reference."
+                            "outputs (default): one line per sorted output image, in sorted order.\n"
+                            "references: one line per `reference_images` item, in input order.\n"
+                            "inputs: one line per `image` item, in input order.\n"
+                            "paired: one line per sorted output with the closest match from the "
+                            "opposite batch."
                         ),
                     },
                 ),
@@ -599,6 +634,21 @@ class HeadOrientationNode:
                         "tooltip": "Output unit for angles and distance.",
                     },
                 ),
+                "min_detection_confidence": (
+                    "FLOAT",
+                    {
+                        "default": DEFAULT_DETECTION_CONFIDENCE,
+                        "min": 0.05,
+                        "max": 1.0,
+                        "step": 0.05,
+                        "tooltip": (
+                            "MediaPipe face detection confidence threshold. Lower = more "
+                            "permissive (catches dim / cropped / cluttered faces, may produce "
+                            "false positives). Default 0.3 is more forgiving than the original "
+                            "0.5 and works better for dark portraits, faces in caps, etc."
+                        ),
+                    },
+                ),
                 "include_index": (
                     "BOOLEAN",
                     {
@@ -611,8 +661,8 @@ class HeadOrientationNode:
                     {
                         "default": False,
                         "tooltip": (
-                            "For outputs/inputs/paired content: append the angular distance "
-                            "from this row's orientation to the closest reference."
+                            "Append the angular distance from this row's orientation to the "
+                            "closest item in the OPPOSITE batch."
                         ),
                     },
                 ),
@@ -632,25 +682,50 @@ class HeadOrientationNode:
     CATEGORY = "image/PabloGFX"
 
     def __init__(self):
-        self._detector = _FaceDetector(max_num_faces=1, min_detection_confidence=0.5)
-        print(
-            f"{Colors.HEADER}HeadOrientationNode initialized "
-            f"(mode={self._detector.mode}){Colors.ENDC}"
-        )
+        self._detector: Optional[_FaceDetector] = None
+        self._detector_confidence: Optional[float] = None
+        print(f"{Colors.HEADER}HeadOrientationNode v1.3.0 ready{Colors.ENDC}")
 
     def __del__(self):
         try:
-            if getattr(self, "_detector", None) is not None:
+            if self._detector is not None:
                 self._detector.close()
         except Exception:
             pass
+
+    def _get_detector(self, confidence: float) -> _FaceDetector:
+        confidence = float(max(0.05, min(1.0, confidence)))
+        if (
+            self._detector is None
+            or self._detector_confidence is None
+            or abs(self._detector_confidence - confidence) > 1e-6
+        ):
+            if self._detector is not None:
+                self._detector.close()
+            self._detector = _FaceDetector(
+                max_num_faces=1,
+                min_detection_confidence=confidence,
+            )
+            self._detector_confidence = confidence
+            print(
+                f"{Colors.HEADER}[HeadOrientationNode] detector "
+                f"(min_detection_confidence={confidence:.2f}, mode={self._detector.mode}) "
+                f"ready{Colors.ENDC}"
+            )
+        return self._detector
 
     # ------------------------------------------------------------------
     # Pose analysis
     # ------------------------------------------------------------------
 
-    def analyze_orientations(self, images: torch.Tensor) -> List[Orientation]:
-        print(f"{Colors.BLUE}[ANALYZE] Starting analysis of {images.shape[0]} images{Colors.ENDC}")
+    def analyze_orientations(self, images: torch.Tensor,
+                             min_detection_confidence: float = DEFAULT_DETECTION_CONFIDENCE,
+                             batch_label: str = "batch") -> List[Orientation]:
+        detector = self._get_detector(min_detection_confidence)
+        print(
+            f"{Colors.BLUE}[ANALYZE] Starting analysis of {images.shape[0]} {batch_label} "
+            f"images (confidence={min_detection_confidence:.2f}){Colors.ENDC}"
+        )
         orientations: List[Orientation] = []
 
         for idx in range(images.shape[0]):
@@ -673,9 +748,13 @@ class HeadOrientationNode:
             img = np.ascontiguousarray(img)
             h, w = img.shape[:2]
 
-            landmarks = self._detector.process(img)
+            landmarks = detector.process(img)
             if landmarks is None:
-                print(f"{Colors.RED}[ANALYZE] No face detected in image {idx+1}{Colors.ENDC}")
+                print(
+                    f"{Colors.RED}[ANALYZE] No face detected in {batch_label} image "
+                    f"{idx+1} (try lowering min_detection_confidence below "
+                    f"{min_detection_confidence:.2f}){Colors.ENDC}"
+                )
                 orientations.append((0.0, 0.0, 0.0))
                 continue
 
@@ -730,27 +809,27 @@ class HeadOrientationNode:
     # Sorting
     # ------------------------------------------------------------------
 
-    def _sort(self, input_orientations: List[Orientation],
-              reference_orientations: List[Orientation],
+    def _sort(self, pool_orientations: List[Orientation],
+              target_orientations: List[Orientation],
               sort_mode: str, similarity_metric: str,
               output_count: int) -> List[int]:
-        if not input_orientations:
+        if not pool_orientations:
             return []
 
         if sort_mode == "as_is":
-            indices = list(range(len(input_orientations)))
-            target_count = output_count or len(input_orientations)
+            indices = list(range(len(pool_orientations)))
+            target_count = output_count or len(pool_orientations)
         elif sort_mode == "match_references":
-            indices = _sort_match_references(input_orientations, reference_orientations)
-            target_count = output_count or len(reference_orientations) or len(input_orientations)
+            indices = _sort_match_references(pool_orientations, target_orientations)
+            target_count = output_count or len(target_orientations) or len(pool_orientations)
         elif sort_mode == "reverse_similarity":
-            indices = _sort_similarity(input_orientations, reference_orientations,
+            indices = _sort_similarity(pool_orientations, target_orientations,
                                        similarity_metric, descending=True)
-            target_count = output_count or len(input_orientations)
+            target_count = output_count or len(pool_orientations)
         else:  # similarity_to_refs (default)
-            indices = _sort_similarity(input_orientations, reference_orientations,
+            indices = _sort_similarity(pool_orientations, target_orientations,
                                        similarity_metric, descending=False)
-            target_count = output_count or len(input_orientations)
+            target_count = output_count or len(pool_orientations)
 
         return _apply_count(indices, target_count)
 
@@ -759,13 +838,15 @@ class HeadOrientationNode:
     # ------------------------------------------------------------------
 
     def process_images(self, image, reference_images,
+                       sort_source: str = "references",
                        sort_mode: str = "similarity_to_refs",
                        similarity_metric: str = "min_to_any_ref",
                        output_count: int = 0,
-                       data_content: str = "references",
+                       data_content: str = "outputs",
                        data_format: str = "compact",
                        decimals: int = 2,
                        angle_unit: str = "degrees",
+                       min_detection_confidence: float = DEFAULT_DETECTION_CONFIDENCE,
                        include_index: bool = False,
                        include_distance: bool = False,
                        include_header: bool = False):
@@ -774,32 +855,48 @@ class HeadOrientationNode:
             f"reference batch: {tuple(reference_images.shape)}{Colors.ENDC}"
         )
         print(
-            f"{Colors.BLUE}[PROCESS] sort={sort_mode}, metric={similarity_metric}, "
-            f"count={output_count or 'auto'}, data={data_content}, fmt={data_format}, "
-            f"dec={decimals}, unit={angle_unit}{Colors.ENDC}"
+            f"{Colors.BLUE}[PROCESS] sort_source={sort_source}, sort={sort_mode}, "
+            f"metric={similarity_metric}, count={output_count or 'auto'}, "
+            f"data={data_content}, fmt={data_format}, dec={decimals}, unit={angle_unit}, "
+            f"min_conf={min_detection_confidence:.2f}{Colors.ENDC}"
         )
 
-        input_orientations = self.analyze_orientations(image)
-        reference_orientations = self.analyze_orientations(reference_images)
+        input_orientations = self.analyze_orientations(
+            image, min_detection_confidence, batch_label="input"
+        )
+        reference_orientations = self.analyze_orientations(
+            reference_images, min_detection_confidence, batch_label="reference"
+        )
+
+        if sort_source == "references":
+            pool_orientations: List[Orientation] = list(reference_orientations)
+            target_orientations: List[Orientation] = list(input_orientations)
+            pool_images = reference_images
+        else:
+            pool_orientations = list(input_orientations)
+            target_orientations = list(reference_orientations)
+            pool_images = image
 
         sorted_indices = self._sort(
-            input_orientations,
-            reference_orientations,
+            pool_orientations,
+            target_orientations,
             sort_mode,
             similarity_metric,
             output_count,
         )
 
         if sorted_indices:
-            sorted_images = image[sorted_indices]
+            sorted_images = pool_images[sorted_indices]
         else:
-            sorted_images = image
+            sorted_images = pool_images
 
         rows = _build_rows(
             data_content,
             input_orientations,
             reference_orientations,
             sorted_indices,
+            pool_orientations,
+            target_orientations,
             angle_unit,
         )
         data_output = _format_data(
