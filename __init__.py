@@ -1,11 +1,6 @@
-from .head_orientation_node import HeadOrientationNode
+from .head_orientation_node import (
+    NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS,
+)
 
-NODE_CLASS_MAPPINGS = {
-    "HeadOrientationNode": HeadOrientationNode,
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "HeadOrientationNode": "Head Orientation Node - by PabloGFX",
-}
-
-__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
+__all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
