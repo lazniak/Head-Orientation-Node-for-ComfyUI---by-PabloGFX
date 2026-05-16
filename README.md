@@ -1,54 +1,135 @@
 # Head Orientation Node for ComfyUI
 
-Version **1.1.0** — by **PabloGFX**
+Version **1.2.0** — by **PabloGFX**
 
 A custom ComfyUI node that detects faces, estimates head pose (pitch / yaw /
-roll), and sorts a batch of input images so that the i-th input best matches
-the head orientation of the i-th reference image.
+roll), sorts a batch of input images by similarity to a reference batch, and
+emits a configurable, well-formatted string describing the orientations.
+
+---
+
+## What's new in 1.2.0
+
+### Bug fix
+
+- **The `data` output no longer repeats the same row when the input batch is
+  smaller than the reference batch.** In v1.1.0 (and earlier), `data` would
+  emit duplicate lines because it reflected the sorted output image's
+  orientation — and when the legacy sorter ran out of unique inputs it just
+  repeated the last one. The new default `data_content = "references"` emits
+  one line per reference image instead, so every line carries distinct,
+  meaningful information.
+
+### New sort modes
+
+- `similarity_to_refs` *(new default)* — sort all input images by similarity to
+  the reference batch, closest first. Output count = input count.
+- `reverse_similarity` — same metric, farthest first.
+- `match_references` — legacy v1.1.0 / v1.0.x behaviour: greedy 1-to-1 match;
+  output count = reference count; the last assigned input is repeated to fill.
+- `as_is` — pass inputs through in their original order (still computes
+  orientations).
+
+A `similarity_metric` parameter chooses how each input is scored against the
+reference batch:
+
+- `min_to_any_ref` *(default)* — distance to the nearest reference.
+- `mean_to_refs` — average distance to all references.
+- `first_ref_only` — distance to the first reference only.
+
+### New `output_count` override
+
+- `output_count = 0` *(default)* uses the mode's natural size (input count for
+  similarity / as_is, reference count for match).
+- Set any positive integer to force a fixed batch size. Excess items are
+  truncated; missing items are filled by repeating the last.
+
+### New configurable `data` string
+
+| Parameter           | Default       | Effect                                                                       |
+| ------------------- | ------------- | ---------------------------------------------------------------------------- |
+| `data_content`      | `references`  | What rows the string contains: `references`, `outputs`, `inputs`, `paired`   |
+| `data_format`       | `compact`     | `compact`, `labeled`, `csv`, `json`, `verbose`                               |
+| `decimals`          | `2`           | Decimal places for angles and distance                                       |
+| `angle_unit`        | `degrees`     | `degrees` or `radians`                                                       |
+| `include_index`     | `false`       | Prepend the 1-based row index to each line                                   |
+| `include_distance`  | `false`       | Append the angular distance to the closest reference (outputs / inputs / paired) |
+| `include_header`    | `false`       | csv only — prepend a header row with column names                            |
+
+### Data content modes
+
+- `references` *(default)* — one line per reference image. Use this when you
+  want to see what target poses you supplied.
+- `outputs` — one line per sorted output image.
+- `inputs` — one line per ORIGINAL input image (before sorting).
+- `paired` — one line per sorted output, paired with its closest reference and
+  distance. Best when you want a side-by-side comparison.
+
+### Data format examples
+
+`compact` (default, same shape as v1.1.0):
+
+```
+[pitch,yaw,roll]
+[pitch,yaw,roll]
+```
+
+`labeled`:
+
+```
+pitch=-0.72 yaw=-2.11 roll=-0.13
+pitch=-0.81 yaw=1.72 roll=0.12
+```
+
+`csv` with header + index + distance + `paired`:
+
+```
+index,pitch,yaw,roll,ref_pitch,ref_yaw,ref_roll,distance
+1,-0.72,-2.11,-0.13,-0.72,-2.11,-0.13,0.00
+2,-0.81,1.72,0.12,-0.81,1.72,0.12,0.00
+```
+
+`json`:
+
+```json
+[
+  {
+    "label": "output",
+    "pitch": -0.72,
+    "yaw": -2.11,
+    "roll": -0.13,
+    "reference": { "pitch": -0.72, "yaw": -2.11, "roll": -0.13 },
+    "distance": 0.0
+  }
+]
+```
+
+`verbose`:
+
+```
+Output 1:
+  Orientation: pitch=-0.72, yaw=-2.11, roll=-0.13
+  Reference:   pitch=-0.72, yaw=-2.11, roll=-0.13
+  Distance:    0.00
+```
+
+---
 
 ## What's new in 1.1.0
 
-- **Compatibility with modern MediaPipe (>=0.10).** Earlier versions of this
-  node relied on `mediapipe.solutions.face_mesh`, which is no longer present in
-  the slimmed-down `mediapipe` builds shipped with recent Python embeds (e.g.
-  the ComfyUI Windows portable). The node now uses the new
+- **Compatibility with modern MediaPipe (>=0.10).** The previous code relied on
+  `mediapipe.solutions.face_mesh`, which is missing from the slimmed-down
+  mediapipe builds shipped with recent Python embeds (e.g. the ComfyUI Windows
+  portable). The node now uses the new
   `mediapipe.tasks.python.vision.FaceLandmarker` API and falls back to the
-  legacy `solutions.face_mesh` API if it is available — so the same code works
-  on old and new MediaPipe installations.
-- **Automatic model download.** On first use the node downloads the official
-  Google-hosted `face_landmarker.task` model (~3.7 MB) into
-  `head-orientation-node/models/` and reuses it afterwards. No manual setup is
-  required.
-- **More robust image handling.** Correct RGB handling (the legacy code
-  unintentionally swapped R and B channels via an extra `cvtColor` call),
-  graceful handling of grayscale and RGBA inputs, and safer batch sorting when
-  no input images are provided.
-- **Better diagnostics.** The node prints the MediaPipe backend it is using
-  (`legacy` vs. `tasks`) and reports model-download progress.
+  legacy `solutions.face_mesh` API if it is available.
+- **Automatic model download** of the official Google-hosted
+  `face_landmarker.task` (~3.7 MB) into `models/`.
+- **Correct RGB handling** (the legacy code unintentionally swapped R and B
+  via an extra `cv2.cvtColor` call), graceful handling of grayscale / RGBA
+  inputs, and safer batch sorting when no input images are provided.
 
-## Data output format
-
-The node returns two outputs:
-
-1. `sorted_images` — the input batch reordered to best match the reference
-   batch.
-2. `data` — a multi-line string where each line is the head orientation of one
-   sorted output image in the form `[x,y,z]`, where:
-   - `x` — rotation around the X-axis (pitch, nodding up/down)
-   - `y` — rotation around the Y-axis (yaw, turning left/right)
-   - `z` — rotation around the Z-axis (roll, tilting side to side)
-
-All values are in degrees, rounded to two decimal places, one orientation per
-line.
-
-## Features
-
-- Detects facial landmarks with MediaPipe (new Tasks API or legacy face_mesh).
-- Estimates head orientation (pitch, yaw, roll) for every image in a batch.
-- Sorts the input batch by similarity to a reference batch (greedy 3D-angle
-  match).
-- Handles batches of arbitrary size, with safe fallbacks when there are fewer
-  inputs than references.
+---
 
 ## Installation
 
@@ -78,20 +159,22 @@ line.
    PabloGFX** (category `image/PabloGFX`).
 2. Connect a batch of images to `image`.
 3. Connect a reference batch to `reference_images`.
-4. The node outputs the input batch reordered to best match the orientations of
-   the reference batch, together with the per-image orientation string.
+4. (Optional) Tweak `sort_mode`, `data_content`, `data_format`, etc.
+5. The node outputs the input batch sorted/matched and the per-row data
+   string.
 
 ## How it works
 
-1. For each image the node converts the ComfyUI tensor to an `RGB uint8` image
-   and runs MediaPipe face landmark detection.
+1. Each image is converted to an RGB `uint8` array and run through MediaPipe
+   face landmark detection (Tasks API by default; legacy `solutions` API as a
+   fallback).
 2. Six canonical landmarks (eyes, nose, mouth corners, chin) are fed into
    OpenCV's `solvePnP` together with a simple pinhole camera model to recover
-   the head rotation, which is decomposed into pitch / yaw / roll.
-3. Each reference orientation is greedily matched to the closest unused input
-   orientation by Euclidean distance in (pitch, yaw, roll) space.
-4. If there are fewer inputs than references, the last matched input is
-   repeated to keep the batch sizes aligned.
+   the head rotation, then decomposed into pitch / yaw / roll.
+3. Inputs are sorted (or matched 1-to-1) against the references using the
+   selected mode and metric.
+4. The data string is built according to `data_content`, `data_format`, and
+   the formatting flags.
 
 ## Notes about the MediaPipe model
 

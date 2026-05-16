@@ -1,7 +1,7 @@
 [project]
 name = "head-orientation-node"
 description = "A custom node for ComfyUI that analyzes and sorts images based on head orientation using MediaPipe. It detects facial landmarks, calculates head pose, and intelligently sorts images for enhanced AI image processing workflows."
-version = "1.1.0"
+version = "1.2.0"
 license = {file = "LICENSE"}
 dependencies  = ["numpy>=1.19.3", "opencv-python>=4.5.5.64", "mediapipe>=0.10.0", "Pillow>=8.3.1", "torch>=1.9.0"]
 
