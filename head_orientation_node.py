@@ -200,6 +200,21 @@ DATA_FORMATS = ["compact", "labeled", "csv", "json", "verbose"]
 ANGLE_UNITS = ["degrees", "radians"]
 
 DEFAULT_DETECTION_CONFIDENCE = 0.3
+DEFAULT_DETECTION_MAX_SIDE = 1280
+DETECTION_FALLBACK_SIZES = (1280, 1600, 960, 640, 480)
+
+
+def _downscale_for_detection(img: np.ndarray, target_max_side: int) -> np.ndarray:
+    """Resizes `img` so the longest side equals `target_max_side`. Returns the
+    original array if it already fits."""
+    h, w = img.shape[:2]
+    max_dim = max(h, w)
+    if max_dim <= target_max_side:
+        return img
+    scale = target_max_side / float(max_dim)
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    return cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
 
 def _angular_distance(a: Orientation, b: Orientation) -> float:
@@ -649,6 +664,23 @@ class HeadOrientationNode:
                         ),
                     },
                 ),
+                "detection_max_side": (
+                    "INT",
+                    {
+                        "default": DEFAULT_DETECTION_MAX_SIDE,
+                        "min": 256,
+                        "max": 8192,
+                        "step": 64,
+                        "tooltip": (
+                            "Longest side (px) the image is downscaled to BEFORE running "
+                            "MediaPipe face detection. Default 1280. MediaPipe's BlazeFace works "
+                            "on ~128 px internal tiles and often misses faces in very large "
+                            "images (e.g. 4K phone photos). On failure the node also tries other "
+                            "preset sizes (1600 / 960 / 640 / 480) automatically. The final "
+                            "sorted_images output is always at the ORIGINAL resolution."
+                        ),
+                    },
+                ),
                 "include_index": (
                     "BOOLEAN",
                     {
@@ -684,7 +716,7 @@ class HeadOrientationNode:
     def __init__(self):
         self._detector: Optional[_FaceDetector] = None
         self._detector_confidence: Optional[float] = None
-        print(f"{Colors.HEADER}HeadOrientationNode v1.3.0 ready{Colors.ENDC}")
+        print(f"{Colors.HEADER}HeadOrientationNode v1.4.0 ready{Colors.ENDC}")
 
     def __del__(self):
         try:
@@ -718,13 +750,53 @@ class HeadOrientationNode:
     # Pose analysis
     # ------------------------------------------------------------------
 
+    def _detect_multi_scale(self, img: np.ndarray, detector: _FaceDetector,
+                            detection_max_side: int) -> Tuple[Optional[List], Optional[int]]:
+        """Try detection at the primary size, then at preset fallback sizes.
+        Returns (landmarks, successful_max_side) or (None, None) if all fail."""
+        h, w = img.shape[:2]
+        max_dim = max(h, w)
+
+        # Build deduplicated ordered list of target sizes to try
+        tried_sizes: List[int] = []
+        candidates: List[int] = [detection_max_side, max_dim]
+        candidates.extend(DETECTION_FALLBACK_SIZES)
+        seen: set = set()
+        ordered_sizes: List[int] = []
+        for s in candidates:
+            s = int(max(64, min(s, 8192)))
+            if s not in seen:
+                seen.add(s)
+                ordered_sizes.append(s)
+
+        for target in ordered_sizes:
+            det_img = _downscale_for_detection(img, target)
+            det_img = np.ascontiguousarray(det_img)
+            landmarks = detector.process(det_img)
+            tried_sizes.append(target)
+            if landmarks is not None:
+                if len(tried_sizes) > 1:
+                    print(
+                        f"{Colors.YELLOW}[DETECT] face found at fallback max_side="
+                        f"{target} after {tried_sizes[:-1]} failed{Colors.ENDC}"
+                    )
+                return landmarks, target
+
+        print(
+            f"{Colors.RED}[DETECT] no face at any size tried: "
+            f"{tried_sizes}{Colors.ENDC}"
+        )
+        return None, None
+
     def analyze_orientations(self, images: torch.Tensor,
                              min_detection_confidence: float = DEFAULT_DETECTION_CONFIDENCE,
+                             detection_max_side: int = DEFAULT_DETECTION_MAX_SIDE,
                              batch_label: str = "batch") -> List[Orientation]:
         detector = self._get_detector(min_detection_confidence)
         print(
             f"{Colors.BLUE}[ANALYZE] Starting analysis of {images.shape[0]} {batch_label} "
-            f"images (confidence={min_detection_confidence:.2f}){Colors.ENDC}"
+            f"images (confidence={min_detection_confidence:.2f}, "
+            f"max_side={detection_max_side}){Colors.ENDC}"
         )
         orientations: List[Orientation] = []
 
@@ -748,12 +820,13 @@ class HeadOrientationNode:
             img = np.ascontiguousarray(img)
             h, w = img.shape[:2]
 
-            landmarks = detector.process(img)
+            landmarks, _ = self._detect_multi_scale(img, detector, detection_max_side)
             if landmarks is None:
                 print(
                     f"{Colors.RED}[ANALYZE] No face detected in {batch_label} image "
-                    f"{idx+1} (try lowering min_detection_confidence below "
-                    f"{min_detection_confidence:.2f}){Colors.ENDC}"
+                    f"{idx+1} ({w}x{h}). Try lowering min_detection_confidence below "
+                    f"{min_detection_confidence:.2f} or adjusting detection_max_side."
+                    f"{Colors.ENDC}"
                 )
                 orientations.append((0.0, 0.0, 0.0))
                 continue
@@ -847,6 +920,7 @@ class HeadOrientationNode:
                        decimals: int = 2,
                        angle_unit: str = "degrees",
                        min_detection_confidence: float = DEFAULT_DETECTION_CONFIDENCE,
+                       detection_max_side: int = DEFAULT_DETECTION_MAX_SIDE,
                        include_index: bool = False,
                        include_distance: bool = False,
                        include_header: bool = False):
@@ -858,14 +932,16 @@ class HeadOrientationNode:
             f"{Colors.BLUE}[PROCESS] sort_source={sort_source}, sort={sort_mode}, "
             f"metric={similarity_metric}, count={output_count or 'auto'}, "
             f"data={data_content}, fmt={data_format}, dec={decimals}, unit={angle_unit}, "
-            f"min_conf={min_detection_confidence:.2f}{Colors.ENDC}"
+            f"min_conf={min_detection_confidence:.2f}, "
+            f"detection_max_side={detection_max_side}{Colors.ENDC}"
         )
 
         input_orientations = self.analyze_orientations(
-            image, min_detection_confidence, batch_label="input"
+            image, min_detection_confidence, detection_max_side, batch_label="input"
         )
         reference_orientations = self.analyze_orientations(
-            reference_images, min_detection_confidence, batch_label="reference"
+            reference_images, min_detection_confidence, detection_max_side,
+            batch_label="reference"
         )
 
         if sort_source == "references":

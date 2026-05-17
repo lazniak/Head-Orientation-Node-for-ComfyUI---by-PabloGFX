@@ -1,10 +1,37 @@
 # Head Orientation Node for ComfyUI
 
-Version **1.3.0** — by **PabloGFX**
+Version **1.4.0** — by **PabloGFX**
 
 A custom ComfyUI node that detects faces, estimates head pose (pitch / yaw /
 roll), sorts a batch of images by similarity to a query / reference batch, and
 emits a configurable, well-formatted string describing the orientations.
+
+---
+
+## What's new in 1.4.0
+
+### Multi-scale face detection for large images
+
+MediaPipe's BlazeFace detector works on small internal tiles (~128 px) and
+silently fails on very large source images (e.g. 4K phone photos, 4080 × 2336
+references) — even at the minimum confidence threshold — because the face
+ends up covering too few pixels after the model's internal preprocessing.
+
+v1.4.0 adds an automatic downscale step that runs detection at a manageable
+size first and falls back through a small list of preset sizes when needed:
+
+- New `detection_max_side` parameter (INT, default `1280`, range `256`–`8192`,
+  step `64`). The image is downscaled so its longest side is at most this
+  value before face detection runs. The final `sorted_images` output is always
+  at the ORIGINAL resolution — only detection happens on the downscaled copy.
+- If detection fails at the chosen size, the node automatically retries at
+  `1600 → 960 → 640 → 480` and logs which size finally succeeded.
+- Landmarks come back in normalized [0, 1] coordinates, so the PnP head-pose
+  math uses the ORIGINAL image dimensions and is unaffected by the downscale.
+
+In the user-reported case (1 query at 4608 × 3712 + 2 references at
+2336 × 4080) detection now succeeds where it previously returned `[0,0,0]` at
+`min_detection_confidence=0.05`.
 
 ---
 
